@@ -1,0 +1,15 @@
+[project]
+name = "drawinggenerator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "flask==3.1.1",
+    "imutils==0.5.4",
+    "matplotlib==3.10.0",
+    "numpy==1.26.4",
+    "opencv-python==4.11.0.86",
+    "orjson==3.11.9",
+    "pillow==11.1.0",
+]
