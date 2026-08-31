@@ -1499,6 +1499,224 @@ class LShapeOutlineGenerator(Generator):
         return 6 * 2
 
 
+class RectilinearOutlineGenerator(Generator):
+    """
+    A generator that generates the outline of a general rectilinear part.
+
+    The part is grown as a polyomino on a `grid` x `grid` lattice and its boundary is traced, so it
+    is a single simple rectilinear polygon by construction: one connected area, no holes, no
+    self-intersection and no vertex where the boundary touches itself. Collinear boundary runs are
+    merged, so no two consecutive edges lie on the same line and the decomposition of a stroke into
+    edges is never ambiguous. Two edges that do not share a vertex are at least one cell apart,
+    which is what keeps two strokes from reading as one.
+
+    `n_cells` is the difficulty: more cells make a longer, more involved boundary. The l-shape is
+    the special case of a boundary with six edges, so this generator is the same task one rung up.
+
+    Every constraint is checked rather than assumed, and a candidate that fails any of them is
+    thrown away and drawn again — an outline that reached the dataset unchecked would be a record
+    the image does not determine.
+    """
+
+    def __init__(
+        self,
+        grid: int = 8,
+        n_cells: int = 12,
+        min_edges: int = 8,
+        max_edges: int = 24,
+        min_edge_cells: int = 1,
+        max_attempts: int = 200,
+    ):
+        assert grid >= 3, "grid must leave room for a part"
+        assert 1 <= n_cells <= grid * grid, "n_cells must fit on the grid"
+        assert 4 <= min_edges <= max_edges, "an outline has at least four edges"
+        assert min_edge_cells >= 1, "an edge spans at least one cell"
+        self.grid = grid
+        self.n_cells = n_cells
+        self.min_edges = min_edges
+        self.max_edges = max_edges
+        self.min_edge_cells = min_edge_cells
+        self.max_attempts = max_attempts
+
+    # -- growing the area ------------------------------------------------------------------
+
+    def _grow(self) -> Set[Tuple[int, int]]:
+        """A connected set of `n_cells` cells, grown one orthogonal neighbour at a time."""
+        start = (random.randrange(self.grid), random.randrange(self.grid))
+        cells = {start}
+        frontier = self._neighbours(start)
+        while len(cells) < self.n_cells and frontier:
+            cell = random.choice(sorted(frontier))
+            frontier.discard(cell)
+            if cell in cells:
+                continue
+            cells.add(cell)
+            frontier |= {n for n in self._neighbours(cell) if n not in cells}
+        return cells
+
+    def _neighbours(self, cell: Tuple[int, int]) -> Set[Tuple[int, int]]:
+        x, y = cell
+        return {
+            (nx, ny)
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))
+            if 0 <= nx < self.grid and 0 <= ny < self.grid
+        }
+
+    def _has_hole(self, cells: Set[Tuple[int, int]]) -> bool:
+        """Whether the complement has a pocket the outside cannot reach, which is a hole."""
+        seen = set()
+        stack = [
+            (x, y)
+            for x in range(-1, self.grid + 1)
+            for y in (-1, self.grid)
+            if (x, y) not in cells
+        ] + [
+            (x, y)
+            for y in range(-1, self.grid + 1)
+            for x in (-1, self.grid)
+            if (x, y) not in cells
+        ]
+        while stack:
+            cell = stack.pop()
+            if cell in seen or cell in cells:
+                continue
+            x, y = cell
+            if not (-1 <= x <= self.grid and -1 <= y <= self.grid):
+                continue
+            seen.add(cell)
+            stack.extend(((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)))
+        outside = (self.grid + 2) * (self.grid + 2) - len(cells)
+        return len(seen) != outside
+
+    def _has_pinch(self, cells: Set[Tuple[int, int]]) -> bool:
+        """Two cells meeting only at a corner, where the boundary would touch itself at a point."""
+        for x, y in cells:
+            for dx, dy in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+                if (x + dx, y + dy) in cells and (x + dx, y) not in cells and (x, y + dy) not in cells:
+                    return True
+        return False
+
+    # -- tracing its boundary --------------------------------------------------------------
+
+    def _boundary(self, cells: Set[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        """The boundary as a cycle of lattice points, collinear runs already merged."""
+        # every cell edge with the area on one side and nothing on the other, directed so the area
+        # stays on the left and the cycle therefore closes
+        edges: dict = {}
+        for x, y in cells:
+            if (x, y - 1) not in cells:
+                edges[(x, y)] = (x + 1, y)
+            if (x + 1, y) not in cells:
+                edges[(x + 1, y)] = (x + 1, y + 1)
+            if (x, y + 1) not in cells:
+                edges[(x + 1, y + 1)] = (x, y + 1)
+            if (x - 1, y) not in cells:
+                edges[(x, y + 1)] = (x, y)
+        if not edges:
+            return []
+        start = min(edges)
+        cycle = [start]
+        current = edges[start]
+        while current != start:
+            if current not in edges or len(cycle) > 4 * len(cells) + 4:
+                return []  # not a single closed boundary
+            cycle.append(current)
+            current = edges[current]
+        if len(cycle) != len(edges):
+            return []  # the boundary fell into more than one loop
+        return self._merge_collinear(cycle)
+
+    @staticmethod
+    def _merge_collinear(cycle: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        """Drops every point whose neighbours lie on the same line, so consecutive edges turn."""
+        merged = []
+        n = len(cycle)
+        for i in range(n):
+            before, here, after = cycle[i - 1], cycle[i], cycle[(i + 1) % n]
+            turns = (here[0] - before[0], here[1] - before[1]) != (after[0] - here[0], after[1] - here[1])
+            if turns:
+                merged.append(here)
+        return merged
+
+    # -- the outline it stands for ---------------------------------------------------------
+
+    def _outline(self) -> Optional[List[PartLine]]:
+        cells = self._grow()
+        if len(cells) < self.n_cells or self._has_hole(cells) or self._has_pinch(cells):
+            return None
+        corners = self._boundary(cells)
+        if not (self.min_edges <= len(corners) <= self.max_edges):
+            return None
+
+        # normalise the lattice to the unit square, keeping the part square rather than stretched
+        xs = [x for x, _ in corners]
+        ys = [y for _, y in corners]
+        span = max(max(xs) - min(xs), max(ys) - min(ys))
+        if span <= 0:
+            return None
+        cell = 1.0 / span
+        if cell * self.min_edge_cells <= 0.0:
+            return None
+        origin = (min(xs), min(ys))
+
+        def point(p: Tuple[int, int]) -> Tuple[float, float]:
+            return ((p[0] - origin[0]) * cell, (p[1] - origin[1]) * cell)
+
+        lines = []
+        n = len(corners)
+        for i in range(n):
+            a, b = corners[i], corners[(i + 1) % n]
+            if abs(a[0] - b[0]) + abs(a[1] - b[1]) < self.min_edge_cells:
+                return None  # an edge shorter than the smallest we allow
+            lines.append(PartLine(point(a), point(b), self._outward(a, b)))
+        return lines
+
+    @staticmethod
+    def _outward(a: Tuple[int, int], b: Tuple[int, int]) -> Tuple[float, float]:
+        """The normal pointing away from the area, for the edge running from `a` to `b`.
+
+        The boundary is traced with the area on the left, so the outward side is to the right.
+        """
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = abs(dx) + abs(dy)
+        return (dy / length, -dx / length)
+
+    # -- the record ------------------------------------------------------------------------
+
+    def get_actions(self) -> List[Element]:
+        outline = None
+        for _ in range(self.max_attempts):
+            outline = self._outline()
+            if outline is not None:
+                break
+        if outline is None:
+            raise RuntimeError(
+                f"no outline of {self.min_edges}..{self.max_edges} edges from {self.n_cells} cells "
+                f"on a {self.grid}x{self.grid} grid in {self.max_attempts} attempts"
+            )
+
+        # the same shuffle the l-shape does, so a record carries no order of its own
+        n = len(outline)
+        permutation_indices = list(range(n))
+        random.shuffle(permutation_indices)
+        ids = [str(i) for i in range(n)]
+        shuffled = [outline[i] for i in permutation_indices]
+        permutation_indices_inv = {i: j for i, j in zip(permutation_indices, range(n))}
+        shuffled_ids = [ids[permutation_indices_inv[i]] for i in range(n)]
+        with_id = [PartLineWithId(id, line) for id, line in zip(ids, shuffled)]
+        connections = [
+            ConnectTwoElementsWithId(shuffled_ids[i], shuffled_ids[(i + 1) % n]) for i in range(n)
+        ]
+        return with_id + connections
+
+    def action_types(self) -> Set[Type[Element]]:
+        return {PartLineWithId, ConnectTwoElementsWithId}
+
+    @property
+    def n_actions(self) -> int:
+        return self.max_edges * 2
+
+
 class AddIdGenerator(GeneratorDecorator):
 
     def __init__(self, generator: Generator):

@@ -106,6 +106,32 @@ HTML_TEMPLATE = """
             color: var(--ink);
         }
         button:hover { transform: translateY(-1px); }
+
+        /* the record's graph, laid over the drawing in the drawing's own coordinates */
+        .viewer-frame { position: relative; }
+        #graphOverlay {
+            position: absolute; inset: 0; width: 100%; height: 100%;
+            pointer-events: none;
+        }
+        #graphOverlay .gnode, #graphOverlay .glink { pointer-events: auto; }
+        .gstroke { stroke: #2c6ea8; stroke-width: 5; opacity: 0.35; }
+        .gdot { fill: #2c6ea8; opacity: 0.45; }
+        .gdot.text { fill: #c96a15; opacity: 0.5; }
+        .glabel {
+            fill: #fff; font-size: 11px; font-family: ui-monospace, monospace;
+            text-anchor: middle; pointer-events: none;
+        }
+        .glink { stroke-width: 3; opacity: 0.3; }
+        .glink.connects { stroke: #2c6ea8; }
+        .glink.annotates { stroke: #c96a15; stroke-dasharray: 6 4; }
+        .gnode.lit .gstroke { stroke: #c0392b; stroke-width: 8; opacity: 1; }
+        .gnode.lit .gdot { fill: #c0392b; opacity: 1; }
+        .glink.lit { stroke: #c0392b; opacity: 0.95; stroke-width: 5; }
+
+        /* the record itself, one hoverable row per element */
+        .record-row { display: block; padding: 1px 4px; border-radius: 3px; }
+        .record-row[data-el] { cursor: pointer; }
+        .record-row.lit { background: #c0392b; color: #fff; }
         .nav-row {
             display: flex;
             gap: 10px;
@@ -228,6 +254,7 @@ HTML_TEMPLATE = """
                     </div>
                     <div class="viewer-frame">
                         <img id="sampleImage" alt="Dataset sample">
+                        <svg id="graphOverlay"></svg>
                     </div>
                     <div class="viewer-frame">
                         <span id="sampleLabel" alt="Dataset label"></span>
@@ -352,10 +379,82 @@ HTML_TEMPLATE = """
             }
             sampleImage.src = sample.image;
             sampleMeta.textContent = `${sample.split} sample ${sample.index + 1} / ${sample.total}`;
-            sampleLabel.innerHTML = `${sample.label}`;
+            renderRecord(sample);
             shapeMeta.textContent = `seed ${sample.seed}`;
             status.textContent = 'Loaded. ArrowLeft and ArrowRight navigate within the current split.';
             syncIndexControls(sample.split, sample.index);
+        }
+
+        let currentGraph = { nodes: [], links: [] };
+
+        /* Highlights one element of the record everywhere it appears: its stroke on the drawing,
+           its row in the record, and its node in the graph. A connection is not visible in the
+           picture, so this is the only way to see what the record claims about it. */
+        function highlight(id) {
+            document.querySelectorAll('[data-el]').forEach(node => {
+                node.classList.toggle('lit', id !== null && node.dataset.el === id);
+            });
+            document.querySelectorAll('[data-link]').forEach(node => {
+                const [a, b] = node.dataset.link.split('|');
+                node.classList.toggle('lit', id !== null && (a === id || b === id));
+            });
+        }
+
+        function renderRecord(sample) {
+            currentGraph = sample.graph || { nodes: [], links: [] };
+            const rows = String(sample.label).split('<br>');
+            const byPosition = new Map(currentGraph.nodes.map(n => [n.position, n.id]));
+            sampleLabel.innerHTML = rows.map((row, position) => {
+                const id = byPosition.get(position);
+                const attr = id === undefined ? '' : ` data-el="${id}"`;
+                return `<span class="record-row"${attr}>${row}</span>`;
+            }).join('');
+            sampleLabel.querySelectorAll('.record-row').forEach(row => {
+                row.addEventListener('mouseenter', () => highlight(row.dataset.el ?? null));
+                row.addEventListener('mouseleave', () => highlight(null));
+            });
+            drawOverlay();
+        }
+
+        /* The strokes the record names, drawn over the picture in its own coordinates, plus the
+           connections it states, which the picture cannot show. */
+        function drawOverlay() {
+            const svg = document.getElementById('graphOverlay');
+            const size = 1000;
+            svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+            const at = p => [p[0] * size, p[1] * size];
+            const centre = n => n.kind === 'part'
+                ? [(n.start[0] + n.end[0]) / 2 * size, (n.start[1] + n.end[1]) / 2 * size]
+                : (n.point ? at(n.point) : null);
+            const byId = new Map(currentGraph.nodes.map(n => [n.id, n]));
+
+            const links = currentGraph.links.map(l => {
+                const a = byId.get(l.a), b = byId.get(l.b);
+                if (!a || !b) return '';
+                const [ax, ay] = centre(a) || [], [bx, by] = centre(b) || [];
+                if (ax === undefined || bx === undefined) return '';
+                return `<line class="glink ${l.kind}" data-link="${l.a}|${l.b}" x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}"/>`;
+            }).join('');
+
+            const marks = currentGraph.nodes.map(n => {
+                if (n.kind === 'part') {
+                    const [x1, y1] = at(n.start), [x2, y2] = at(n.end);
+                    const [cx, cy] = centre(n);
+                    return `<g data-el="${n.id}" class="gnode">`
+                         + `<line class="gstroke" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`
+                         + `<circle class="gdot" cx="${cx}" cy="${cy}" r="9"/>`
+                         + `<text class="glabel" x="${cx}" y="${cy + 4}">${n.id}</text></g>`;
+                }
+                const spot = centre(n);
+                if (!spot) return '';
+                return `<g data-el="${n.id}" class="gnode"><circle class="gdot text" cx="${spot[0]}" cy="${spot[1]}" r="7"/></g>`;
+            }).join('');
+
+            svg.innerHTML = links + marks;
+            svg.querySelectorAll('[data-el]').forEach(node => {
+                node.addEventListener('mouseenter', () => highlight(node.dataset.el));
+                node.addEventListener('mouseleave', () => highlight(null));
+            });
         }
 
         function step(delta) {
@@ -468,11 +567,13 @@ class DatasetBundle:
         labels = self.splits[split_name]["labels"]
         seeds = self.splits[split_name]["seeds"]
         image = np.asarray(images[index], dtype=np.uint8)
+        actions = round_floats(json.loads(labels[index]))
         return {
             "split": split_name,
             "index": index,
             "total": count,
-            "label": visualize(round_floats(json.loads(labels[index]))),
+            "label": visualize(actions),
+            "graph": graph_of(actions),
             "seed": int(seeds[index]),
             "image": image_to_data_url(image),
         }
@@ -487,6 +588,44 @@ class DatasetBundle:
             "generator_definition": self.metadata.get("generator_definition", ""),
             "metadata": self.metadata,
         }
+
+
+def graph_of(actions: list) -> Dict[str, object]:
+    """The record as a graph: a node per drawn element, a link per stated connection.
+
+    An element is named by where it sits in the action list — the same reading
+    `PartLineWithId.from_params` uses, which takes the id from the action index — so a connection
+    naming "2" means the third action. The viewer draws this beside the picture because a
+    connection is the one part of a record the drawing cannot show.
+    """
+    nodes, links = [], []
+    for position, action in enumerate(actions):
+        kind = action.get("type", "?")
+        points = action.get("coordinates_params") or []
+        discrete = action.get("discrete_params") or []
+        if kind == "PartLineWithId" and len(points) >= 2:
+            nodes.append({
+                "id": str(position),
+                "kind": "part",
+                "position": position,
+                "start": points[0],
+                "end": points[1],
+            })
+        elif kind == "AnnotationTextRefId":
+            nodes.append({
+                "id": str(position),
+                "kind": "text",
+                "position": position,
+                "point": points[0] if points else None,
+            })
+            for ref in discrete:
+                links.append({"a": str(ref), "b": str(position), "kind": "annotates"})
+        elif kind == "ConnectTwoElementsWithId" and len(discrete) >= 2:
+            links.append({"a": str(discrete[0]), "b": str(discrete[1]), "kind": "connects"})
+
+    known = {n["id"] for n in nodes}
+    links = [l for l in links if l["a"] in known and l["b"] in known]
+    return {"nodes": nodes, "links": links}
 
 
 class DatasetState:
