@@ -1640,36 +1640,51 @@ class RectilinearOutlineGenerator(Generator):
 
     # -- the outline it stands for ---------------------------------------------------------
 
-    def _outline(self) -> Optional[List[PartLine]]:
+    def _lattice_outline(self) -> Optional[List[Tuple[int, int]]]:
+        """The corners of one grown part in lattice coordinates, or ``None`` where the growth
+        broke a constraint or the boundary has the wrong number of edges."""
         cells = self._grow()
         if len(cells) < self.n_cells or self._has_hole(cells) or self._has_pinch(cells):
             return None
         corners = self._boundary(cells)
         if not (self.min_edges <= len(corners) <= self.max_edges):
             return None
+        n = len(corners)
+        for i in range(n):
+            a, b = corners[i], corners[(i + 1) % n]
+            if abs(a[0] - b[0]) + abs(a[1] - b[1]) < self.min_edge_cells:
+                return None  # an edge shorter than the smallest we allow
+        return corners
 
-        # normalise the lattice to the unit square, keeping the part square rather than stretched
+    @staticmethod
+    def _to_unit_square(corners: List[Tuple[float, float]]):
+        """A map from lattice coordinates to the unit square that keeps the part square rather
+        than stretched, or ``None`` where the part has no extent."""
         xs = [x for x, _ in corners]
         ys = [y for _, y in corners]
         span = max(max(xs) - min(xs), max(ys) - min(ys))
         if span <= 0:
             return None
         cell = 1.0 / span
-        if cell * self.min_edge_cells <= 0.0:
-            return None
         origin = (min(xs), min(ys))
 
-        def point(p: Tuple[int, int]) -> Tuple[float, float]:
+        def point(p: Tuple[float, float]) -> Tuple[float, float]:
             return ((p[0] - origin[0]) * cell, (p[1] - origin[1]) * cell)
 
-        lines = []
+        return point
+
+    def _outline(self) -> Optional[List[PartLine]]:
+        corners = self._lattice_outline()
+        if corners is None:
+            return None
+        point = self._to_unit_square(corners)
+        if point is None:
+            return None
         n = len(corners)
-        for i in range(n):
-            a, b = corners[i], corners[(i + 1) % n]
-            if abs(a[0] - b[0]) + abs(a[1] - b[1]) < self.min_edge_cells:
-                return None  # an edge shorter than the smallest we allow
-            lines.append(PartLine(point(a), point(b), self._outward(a, b)))
-        return lines
+        return [
+            PartLine(point(corners[i]), point(corners[(i + 1) % n]), self._outward(corners[i], corners[(i + 1) % n]))
+            for i in range(n)
+        ]
 
     @staticmethod
     def _outward(a: Tuple[int, int], b: Tuple[int, int]) -> Tuple[float, float]:
@@ -1715,6 +1730,92 @@ class RectilinearOutlineGenerator(Generator):
     @property
     def n_actions(self) -> int:
         return self.max_edges * 2
+
+
+class ChamferedOutlineGenerator(RectilinearOutlineGenerator):
+    """
+    The rectilinear outline with some of its corners cut off.
+
+    A chamfer replaces a corner by one straight line between a point on each of the two edges
+    that met there, so the two edges get shorter and the outline gains an edge that is neither
+    horizontal nor vertical. The two legs of a cut are drawn independently from `cut_cells`,
+    measured in lattice cells, so the chamfer's angle is continuous rather than a fixed 45°.
+    Every edge keeps at least `keep_cells` of its length, so an edge cut at both ends does not
+    vanish; a corner whose legs cannot be at least the shortest cut stays square. `ratio` is how
+    many corners are offered a cut.
+
+    A cut stays inside its corner's cells, so what kept the rectilinear outline readable still
+    holds: a chamfer is at least `1 - cut_cells[1]` cells from any edge it does not meet.
+
+    A chamfer carries no outward normal, so the dimensioning leaves it alone.
+    """
+
+    def __init__(
+        self,
+        ratio: float = 0.5,
+        cut_cells: Tuple[float, float] = (0.25, 0.6),
+        keep_cells: float = 0.35,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        assert 0.0 <= ratio <= 1.0, "ratio is a probability"
+        assert 0.0 < cut_cells[0] <= cut_cells[1] < 1.0, "a cut is a positive part of a cell"
+        assert keep_cells > 0.0, "an edge must keep some of its length"
+        self.ratio = ratio
+        self.cut_cells = cut_cells
+        self.keep_cells = keep_cells
+
+    def _outline(self) -> Optional[List[PartLine]]:
+        corners = self._lattice_outline()
+        if corners is None:
+            return None
+        point = self._to_unit_square(corners)
+        if point is None:
+            return None
+        n = len(corners)
+
+        # edge i runs from corner i to corner i + 1, so corner i sits between edges i - 1 and i.
+        # `cut_start[i]` is taken off the start of edge i, `cut_end[i]` off its end; together
+        # they may use up all of an edge but `keep_cells`.
+        lengths = [self._cells(corners[i], corners[(i + 1) % n]) for i in range(n)]
+        cut_start, cut_end = [0.0] * n, [0.0] * n
+        chamfered: Set[int] = set()
+        low, high = self.cut_cells
+        for i in random.sample(range(n), n):  # no corner is first in line for an edge's length
+            if random.random() >= self.ratio:
+                continue
+            before, after = (i - 1) % n, i
+            cap_before = min(high, lengths[before] - self.keep_cells - cut_start[before])
+            cap_after = min(high, lengths[after] - self.keep_cells - cut_end[after])
+            if cap_before < low or cap_after < low:
+                continue
+            cut_end[before] = random.uniform(low, cap_before)
+            cut_start[after] = random.uniform(low, cap_after)
+            chamfered.add(i)
+
+        starts, ends = [], []
+        for i in range(n):
+            a, b = corners[i], corners[(i + 1) % n]
+            dx, dy = (b[0] - a[0]) / lengths[i], (b[1] - a[1]) / lengths[i]
+            starts.append((a[0] + dx * cut_start[i], a[1] + dy * cut_start[i]))
+            ends.append((b[0] - dx * cut_end[i], b[1] - dy * cut_end[i]))
+
+        # in cycle order, each chamfer between the two edges it joins
+        lines = []
+        for i in range(n):
+            lines.append(PartLine(point(starts[i]), point(ends[i]), self._outward(corners[i], corners[(i + 1) % n])))
+            after = (i + 1) % n
+            if after in chamfered:
+                lines.append(PartLine(point(ends[i]), point(starts[after]), None))
+        return lines
+
+    @staticmethod
+    def _cells(a: Tuple[int, int], b: Tuple[int, int]) -> float:
+        return float(abs(b[0] - a[0]) + abs(b[1] - a[1]))
+
+    @property
+    def n_actions(self) -> int:
+        return self.max_edges * 4  # every corner may add an edge, and every edge a join
 
 
 class AddIdGenerator(GeneratorDecorator):

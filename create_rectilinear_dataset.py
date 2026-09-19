@@ -13,6 +13,7 @@ import numpy as np
 from generator import (
     AnnotateLineGenerator,
     AppendFinishDrawingGenerator,
+    ChamferedOutlineGenerator,
     MarginGenerator,
     PartLine,
     PickOneGenerator,
@@ -53,6 +54,10 @@ class DatasetConfig:
     max_edges: int
     min_edge_length: float
     min_gap: float
+    min_turn: float
+    chamfer_ratio: float
+    chamfer_cut: Tuple[float, float]
+    chamfer_keep: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,6 +80,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-edges", type=int, default=24)
     parser.add_argument("--min-edge-length", type=float, default=0.02, help="fraction of the canvas")
     parser.add_argument("--min-gap", type=float, default=0.02, help="fraction of the canvas")
+    parser.add_argument("--min-turn", type=float, default=15.0,
+                        help="least angle in degrees between consecutive edges")
+    parser.add_argument("--chamfer-ratio", type=float, default=0.0,
+                        help="share of corners offered a chamfer; 0 keeps the part rectilinear")
+    parser.add_argument("--chamfer-cut", type=float, nargs=2, default=(0.25, 0.6), metavar=("LOW", "HIGH"),
+                        help="each leg of a chamfer, in cells")
+    parser.add_argument("--chamfer-keep", type=float, default=0.35,
+                        help="the least of an edge, in cells, chamfers leave")
     parser.add_argument("--full", action="store_true", help="Use 131072 train and 1024 validation samples.")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -97,6 +110,15 @@ def validate_args(args: argparse.Namespace) -> DatasetConfig:
         raise ValueError("thickness must be positive")
     if not 0.0 <= args.annotation_ratio <= 1.0:
         raise ValueError("annotation-ratio must be in [0, 1]")
+    if not 0.0 <= args.min_turn < 90.0:
+        raise ValueError("min-turn must be in [0, 90)")
+    if not 0.0 <= args.chamfer_ratio <= 1.0:
+        raise ValueError("chamfer-ratio must be in [0, 1]")
+    low, high = args.chamfer_cut
+    if not 0.0 < low <= high < 1.0:
+        raise ValueError("chamfer-cut must be 0 < LOW <= HIGH < 1")
+    if args.chamfer_keep <= 0.0:
+        raise ValueError("chamfer-keep must be positive")
     return DatasetConfig(
         train_size=train_size,
         val_size=val_size,
@@ -113,14 +135,25 @@ def validate_args(args: argparse.Namespace) -> DatasetConfig:
         max_edges=args.max_edges,
         min_edge_length=args.min_edge_length,
         min_gap=args.min_gap,
+        min_turn=args.min_turn,
+        chamfer_ratio=args.chamfer_ratio,
+        chamfer_cut=(low, high),
+        chamfer_keep=args.chamfer_keep,
     )
 
 
 def generator_definition(config: DatasetConfig) -> str:
-    outline = (
-        f"RectilinearOutlineGenerator(grid={config.grid}, n_cells={config.n_cells}, "
-        f"min_edges={config.min_edges}, max_edges={config.max_edges})"
+    lattice = (
+        f"grid={config.grid}, n_cells={config.n_cells}, "
+        f"min_edges={config.min_edges}, max_edges={config.max_edges}"
     )
+    if config.chamfer_ratio > 0.0:
+        outline = (
+            f"ChamferedOutlineGenerator(ratio={config.chamfer_ratio}, cut_cells={config.chamfer_cut}, "
+            f"keep_cells={config.chamfer_keep}, {lattice})"
+        )
+    else:
+        outline = f"RectilinearOutlineGenerator({lattice})"
     train_outline = (
         "RandomTranslationGenerator("
         f"MarginGenerator(random_mirror_and_rotation_augmentation({outline}), margin={config.margin}), "
@@ -131,17 +164,27 @@ def generator_definition(config: DatasetConfig) -> str:
     return f"AppendFinishDrawingGenerator(ShuffleByElementGenerator({picked}))"
 
 
+def build_outline_generator(config: DatasetConfig):
+    lattice = dict(
+        grid=config.grid,
+        n_cells=config.n_cells,
+        min_edges=config.min_edges,
+        max_edges=config.max_edges,
+    )
+    if config.chamfer_ratio > 0.0:
+        return ChamferedOutlineGenerator(
+            ratio=config.chamfer_ratio,
+            cut_cells=config.chamfer_cut,
+            keep_cells=config.chamfer_keep,
+            **lattice,
+        )
+    return RectilinearOutlineGenerator(**lattice)
+
+
 def build_generator(config: DatasetConfig):
     outline_generator = RandomTranslationGenerator(
         MarginGenerator(
-            random_mirror_and_rotation_augmentation(
-                RectilinearOutlineGenerator(
-                    grid=config.grid,
-                    n_cells=config.n_cells,
-                    min_edges=config.min_edges,
-                    max_edges=config.max_edges,
-                )
-            ),
+            random_mirror_and_rotation_augmentation(build_outline_generator(config)),
             margin=config.margin,
         ),
         max_translation=config.max_translation,
@@ -186,14 +229,19 @@ def render_sample(sample_seed: int, config: DatasetConfig) -> Tuple[np.ndarray, 
         np.random.seed(seed % (2 ** 32))
         try:
             actions = build_generator(config).get_actions()
-            check(actions, min_edge_length=config.min_edge_length, min_gap=config.min_gap)
+            check(
+                actions,
+                min_edge_length=config.min_edge_length,
+                min_gap=config.min_gap,
+                min_turn=config.min_turn,
+            )
         except (Invalid, RuntimeError):
             continue
         image = 255 - build_renderer(config).draw(actions, seed=seed)
         return np.clip(np.rint(image), 0, 255).astype(np.uint8), to_json(actions)
     raise RuntimeError(
         f"no drawing satisfying the constraints in {MAX_RESAMPLES} attempts from seed {sample_seed}; "
-        "loosen min-gap or min-edge-length, or lower n-cells"
+        "loosen min-gap, min-edge-length or min-turn, or lower n-cells"
     )
 
 
@@ -249,8 +297,8 @@ def write_split(split_name: str, count: int, config: DatasetConfig, output_dir: 
 def write_metadata(config: DatasetConfig, output_dir: Path) -> None:
     metadata = {
         "format": "npy-memmap-v1",
-        "task": "annotated-rectilinear-part-outline",
-        "class_names": ["rectilinear_part"],
+        "task": "annotated-chamfered-part-outline" if config.chamfer_ratio > 0.0 else "annotated-rectilinear-part-outline",
+        "class_names": ["chamfered_part" if config.chamfer_ratio > 0.0 else "rectilinear_part"],
         "shape": {
             "grid": config.grid,
             "n_cells": config.n_cells,
@@ -258,6 +306,12 @@ def write_metadata(config: DatasetConfig, output_dir: Path) -> None:
             "max_edges": config.max_edges,
             "min_edge_length": config.min_edge_length,
             "min_gap": config.min_gap,
+            "min_turn": config.min_turn,
+            "chamfer": {
+                "ratio": config.chamfer_ratio,
+                "cut_cells": list(config.chamfer_cut),
+                "keep_cells": config.chamfer_keep,
+            },
         },
         "image_dtype": "uint8",
         "image_shape": [config.canvas_size, config.canvas_size],

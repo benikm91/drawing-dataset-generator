@@ -5,8 +5,8 @@ different records both explain, and a model held against such a picture is asked
 constraint here is a way the image could stop determining its record:
 
 * the part must be one closed area, so its edges form a single cycle;
-* consecutive edges must turn, or two edges render as one straight stroke and where one ends is
-  not visible;
+* consecutive edges must turn, and turn enough to see, or two edges render as one straight
+  stroke and where one ends is not visible;
 * edges that do not share a corner must stay apart, or two strokes read as one;
 * nothing may cross or touch anything it does not share a corner with, part or annotation alike.
 
@@ -14,6 +14,7 @@ The checks are geometric rather than a proxy for one, and a sample that fails an
 away rather than repaired — a repair is a change to the record the picture was drawn from.
 """
 
+import math
 from collections import defaultdict
 from typing import List, Optional, Sequence, Tuple
 
@@ -49,7 +50,7 @@ def _same_point(p: Point, q: Point, tol: float) -> bool:
 
 def _length(s: Segment) -> float:
     (x1, y1), (x2, y2) = s
-    return max(abs(x2 - x1), abs(y2 - y1))
+    return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
 
 
 def _point_segment_distance(p: Point, s: Segment) -> float:
@@ -138,9 +139,11 @@ def check_one_closed_area(edges, joins, tol: float) -> None:
             raise Invalid(f"edges {a} and {b} are joined but share no corner")
 
 
-def check_edges_turn(edges, joins, tol: float) -> None:
-    """Consecutive edges must turn, or the two render as one straight stroke."""
+def check_edges_turn(edges, joins, tol: float, min_turn: float = 0.0) -> None:
+    """Consecutive edges must turn, by at least `min_turn` degrees, or the two render as one
+    straight stroke."""
     by_id = dict(edges)
+    least_sine = math.sin(math.radians(min_turn))
     for a, b in joins:
         (a1, a2), (b1, b2) = by_id[a], by_id[b]
         da = (a2[0] - a1[0], a2[1] - a1[1])
@@ -148,6 +151,10 @@ def check_edges_turn(edges, joins, tol: float) -> None:
         cross = da[0] * db[1] - da[1] * db[0]
         if abs(cross) <= tol:
             raise Invalid(f"edges {a} and {b} are collinear, so where one ends is not visible")
+        sine = abs(cross) / (math.hypot(*da) * math.hypot(*db))
+        if sine < least_sine - 1e-9:
+            turn = math.degrees(math.asin(min(1.0, sine)))
+            raise Invalid(f"edges {a} and {b} turn by only {turn:.1f} degrees, under the {min_turn} minimum")
 
 
 def check_minimum_edge_length(edges, min_length: float) -> None:
@@ -221,11 +228,12 @@ def check(
     min_edge_length: float,
     min_gap: float,
     tol: float = 1e-6,
+    min_turn: float = 0.0,
 ) -> None:
     """Raises [[Invalid]] with the first constraint the drawing breaks."""
     edges, joins = outline_of(actions)
     check_one_closed_area(edges, joins, tol)
-    check_edges_turn(edges, joins, tol)
+    check_edges_turn(edges, joins, tol, min_turn)
     check_minimum_edge_length(edges, min_edge_length)
     check_minimum_gap(edges, joins, min_gap)
     check_nothing_overlaps(actions, joins, min_gap)
@@ -235,10 +243,11 @@ def why_invalid(
     actions: Sequence[Element],
     min_edge_length: float,
     min_gap: float,
+    min_turn: float = 0.0,
 ) -> Optional[str]:
     """The constraint the drawing breaks, or `None` when it breaks none."""
     try:
-        check(actions, min_edge_length, min_gap)
+        check(actions, min_edge_length, min_gap, min_turn=min_turn)
         return None
     except Invalid as invalid:
         return str(invalid)

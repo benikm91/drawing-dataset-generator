@@ -13,4 +13,8 @@ dependencies = [
     "orjson==3.11.9",
     "pillow==11.1.0",
     "scipy==1.15.1",
+    # Reads the SketchGraphs construction sequences create_sketch_dataset.py draws from. Unreleased,
+    # so it is taken from its repository; lz4 is what importing it needs and it does not declare.
+    "sketchgraphs @ git+https://github.com/PrincetonLIPS/SketchGraphs",
+    "lz4>=4.3",
 ]
