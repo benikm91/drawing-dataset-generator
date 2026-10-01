@@ -114,7 +114,7 @@ HTML_TEMPLATE = """
             pointer-events: none;
         }
         #graphOverlay .gnode, #graphOverlay .glink { pointer-events: auto; }
-        .gstroke { stroke: #2c6ea8; stroke-width: 5; opacity: 0.35; }
+        .gstroke { stroke: #2c6ea8; stroke-width: 5; opacity: 0.35; fill: none; }
         .gdot { fill: #2c6ea8; opacity: 0.45; }
         .gdot.text { fill: #c96a15; opacity: 0.5; }
         .glabel {
@@ -380,7 +380,7 @@ HTML_TEMPLATE = """
             sampleImage.src = sample.image;
             sampleMeta.textContent = `${sample.split} sample ${sample.index + 1} / ${sample.total}`;
             renderRecord(sample);
-            shapeMeta.textContent = `seed ${sample.seed}`;
+            shapeMeta.textContent = sample.seed === null ? 'no seed' : `seed ${sample.seed}`;
             status.textContent = 'Loaded. ArrowLeft and ArrowRight navigate within the current split.';
             syncIndexControls(sample.split, sample.index);
         }
@@ -423,9 +423,36 @@ HTML_TEMPLATE = """
             const size = 1000;
             svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
             const at = p => [p[0] * size, p[1] * size];
-            const centre = n => n.kind === 'part'
-                ? [(n.start[0] + n.end[0]) / 2 * size, (n.start[1] + n.end[1]) / 2 * size]
-                : (n.point ? at(n.point) : null);
+            const centre = n => {
+                if (n.kind === 'part') return [(n.start[0] + n.end[0]) / 2 * size, (n.start[1] + n.end[1]) / 2 * size];
+                if (n.kind === 'circle') return [(n.left[0] + n.right[0]) / 2 * size, (n.left[1] + n.right[1]) / 2 * size];
+                if (n.kind === 'arc') return at(n.mid);
+                return n.point ? at(n.point) : null;
+            };
+            const numbered = (n, stroke) => {
+                const [cx, cy] = centre(n);
+                return `<g data-el="${n.id}" class="gnode">${stroke}`
+                     + `<circle class="gdot" cx="${cx}" cy="${cy}" r="9"/>`
+                     + `<text class="glabel" x="${cx}" y="${cy + 4}">${n.id}</text></g>`;
+            };
+            /* An arc's record is three points on it, read clockwise on the drawing; the stroke is
+               the part of the circle through them that runs start, mid, end. */
+            const arcPath = n => {
+                const [ax, ay] = at(n.start), [bx, by] = at(n.mid), [ex, ey] = at(n.end);
+                const d = 2 * (ax * (by - ey) + bx * (ey - ay) + ex * (ay - by));
+                if (Math.abs(d) < 1e-9) return `M ${ax} ${ay} L ${ex} ${ey}`;
+                const a2 = ax * ax + ay * ay, b2 = bx * bx + by * by, e2 = ex * ex + ey * ey;
+                const ux = (a2 * (by - ey) + b2 * (ey - ay) + e2 * (ay - by)) / d;
+                const uy = (a2 * (ex - bx) + b2 * (ax - ex) + e2 * (bx - ax)) / d;
+                const r = Math.hypot(ax - ux, ay - uy);
+                const clockwise = (bx - ax) * (ey - by) - (by - ay) * (ex - bx) > 0;
+                const turn = (from, to) => {
+                    const t = Math.atan2(to[1] - uy, to[0] - ux) - Math.atan2(from[1] - uy, from[0] - ux);
+                    return ((clockwise ? t : -t) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+                };
+                const large = turn([ax, ay], [ex, ey]) > Math.PI ? 1 : 0;
+                return `M ${ax} ${ay} A ${r} ${r} 0 ${large} ${clockwise ? 1 : 0} ${ex} ${ey}`;
+            };
             const byId = new Map(currentGraph.nodes.map(n => [n.id, n]));
 
             const links = currentGraph.links.map(l => {
@@ -439,11 +466,15 @@ HTML_TEMPLATE = """
             const marks = currentGraph.nodes.map(n => {
                 if (n.kind === 'part') {
                     const [x1, y1] = at(n.start), [x2, y2] = at(n.end);
+                    return numbered(n, `<line class="gstroke" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`);
+                }
+                if (n.kind === 'circle') {
                     const [cx, cy] = centre(n);
-                    return `<g data-el="${n.id}" class="gnode">`
-                         + `<line class="gstroke" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`
-                         + `<circle class="gdot" cx="${cx}" cy="${cy}" r="9"/>`
-                         + `<text class="glabel" x="${cx}" y="${cy + 4}">${n.id}</text></g>`;
+                    const r = Math.abs(n.right[0] - n.left[0]) / 2 * size;
+                    return numbered(n, `<circle class="gstroke" cx="${cx}" cy="${cy}" r="${r}"/>`);
+                }
+                if (n.kind === 'arc') {
+                    return numbered(n, `<path class="gstroke" d="${arcPath(n)}"/>`);
                 }
                 const spot = centre(n);
                 if (!spot) return '';
@@ -535,8 +566,10 @@ class DatasetBundle:
         for split_name, count in self.metadata.get("splits", {}).items():
             images = np.load(self.dataset_dir / f"{split_name}_images.npy", mmap_mode="r")
             labels = load_labels(self.dataset_dir / f"{split_name}_labels.jsonl")
-            seeds = np.load(self.dataset_dir / f"{split_name}_seeds.npy", mmap_mode="r")
-            if len(images) != count or len(labels) != count or len(seeds) != count:
+            # The SketchGraphs datasets are taken, not drawn from a seed, and write none.
+            seeds_path = self.dataset_dir / f"{split_name}_seeds.npy"
+            seeds = np.load(seeds_path, mmap_mode="r") if seeds_path.exists() else None
+            if len(images) != count or len(labels) != count or (seeds is not None and len(seeds) != count):
                 raise ValueError(f"Split {split_name} does not match metadata counts.")
             self.splits[split_name] = {
                 "images": images,
@@ -574,7 +607,7 @@ class DatasetBundle:
             "total": count,
             "label": visualize(actions),
             "graph": graph_of(actions),
-            "seed": int(seeds[index]),
+            "seed": None if seeds is None else int(seeds[index]),
             "image": image_to_data_url(image),
         }
 
@@ -610,6 +643,23 @@ def graph_of(actions: list) -> Dict[str, object]:
                 "position": position,
                 "start": points[0],
                 "end": points[1],
+            })
+        elif kind == "Circle" and len(points) >= 2:
+            nodes.append({
+                "id": str(position),
+                "kind": "circle",
+                "position": position,
+                "left": points[0],
+                "right": points[1],
+            })
+        elif kind == "Arc" and len(points) >= 3:
+            nodes.append({
+                "id": str(position),
+                "kind": "arc",
+                "position": position,
+                "start": points[0],
+                "mid": points[1],
+                "end": points[2],
             })
         elif kind == "AnnotationTextRefId":
             nodes.append({

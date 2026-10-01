@@ -845,6 +845,125 @@ class Circle(Element):
 
 
 @dataclass
+class Arc(Element):
+    """
+    A circular arc, said by three points on it: where it starts, the point halfway along it, and
+    where it ends. Two ends alone leave the bulge open -- any circle through them would do -- and
+    the halfway point settles both the circle and which way round the arc runs, so no radius or
+    orientation is stated.
+
+    The record reads the arc clockwise as the drawing shows it (y down), so that an arc has one
+    record: `coordinates_params` swaps the ends of an arc held the other way round.
+    """
+    start_point: Tuple[float, float]
+    mid_point: Tuple[float, float]
+    end_point: Tuple[float, float]
+
+    def round_params(self, decimal_points: int=2) -> 'Arc':
+        return Arc(*(
+            (round(point[0], decimal_points), round(point[1], decimal_points))
+            for point in (self.start_point, self.mid_point, self.end_point)
+        ))
+
+    @property
+    def clockwise(self) -> bool:
+        """Whether start, mid, end run clockwise on the drawing, where y points down."""
+        (sx, sy), (mx, my), (ex, ey) = self.start_point, self.mid_point, self.end_point
+        return (mx - sx) * (ey - my) - (my - sy) * (ex - mx) > 0
+
+    @property
+    def circle(self) -> Optional[Tuple[Tuple[float, float], float]]:
+        """The centre and radius of the circle through the three points, or ``None`` where they
+        lie on a line."""
+        (ax, ay), (bx, by), (cx, cy) = self.start_point, self.mid_point, self.end_point
+        d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+        if abs(d) < 1e-12:
+            return None
+        a2, b2, c2 = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
+        ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
+        uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
+        return (ux, uy), math.hypot(ax - ux, ay - uy)
+
+    def _draw(self, img: np.ndarray, color, thickness, **kwargs) -> None:
+        # Drawn from the record's order, so that an arc held either way round rounds to the same
+        # pixels as the arc its record reads back to.
+        start, mid, end = self.coordinates_params
+        circle = Arc(start, mid, end).circle
+        if circle is None:
+            PartLine(start, end)._draw(img, color=color, thickness=thickness)
+            return
+        (cx, cy), radius = circle
+        if int(round(radius)) <= 0:
+            return
+        # cv2 counts angles clockwise on the image and draws from the smaller to the larger.
+        start_angle = math.degrees(math.atan2(start[1] - cy, start[0] - cx))
+        end_angle = math.degrees(math.atan2(end[1] - cy, end[0] - cx))
+        if end_angle < start_angle:
+            end_angle += 360
+        center = int(round(cx)), int(round(cy))
+        radius = int(round(radius))
+        cv2.ellipse(img, center, (radius, radius), 0, start_angle, end_angle, color, thickness)
+
+    @property
+    def center(self) -> Tuple[float, float]:
+        # The halfway point rather than the circle's centre, which a shallow arc puts far off it.
+        return self.mid_point
+
+    def _map(self, f) -> 'Arc':
+        return Arc(f(self.start_point), f(self.mid_point), f(self.end_point))
+
+    def move(self, dx, dy) -> 'Arc':
+        return self._map(lambda p: (p[0] + dx, p[1] + dy))
+
+    def scale_xy(self, factor_x: float, factor_y: float) -> 'Arc':
+        return self._map(lambda p: (p[0] * factor_x, p[1] * factor_y))
+
+    def mirror_x(self) -> 'Arc':
+        return self._map(lambda p: (p[0], 1 - p[1]))
+
+    def mirror_y(self) -> 'Arc':
+        return self._map(lambda p: (1 - p[0], p[1]))
+
+    def rotate(self, angle: float, center: Tuple[float, float] = (0.5, 0.5)) -> 'Arc':
+        return self._map(lambda p: _rotate_point(p, angle, center))
+
+    @property
+    def _coordinates_params(self) -> List[Tuple[float, float]]:
+        if self.clockwise:
+            return [self.start_point, self.mid_point, self.end_point]
+        return [self.end_point, self.mid_point, self.start_point]
+
+    @property
+    def _continuous_params(self) -> List[float]:
+        return []
+
+    @property
+    def _discrete_params(self) -> List[str]:
+        return []
+
+    @staticmethod
+    def from_params(_: List[str], coordinates_params: List[Tuple[float, float]], continuous_params: List[float]) -> 'Arc':
+        return Arc(*coordinates_params[:3])
+
+    @staticmethod
+    def max_coordinates_params() -> int:
+        return 3
+
+    @staticmethod
+    def max_continuous_params() -> int:
+        return 0
+
+    @staticmethod
+    def max_discrete_params() -> int:
+        return 0
+
+    def approx_equal(self, other: 'Arc', resolution: float, **kwargs) -> bool:
+        if not isinstance(other, Arc):
+            return False
+        return np.allclose(self.coordinates_params, other.coordinates_params, atol=resolution)
+
+
+@dataclass
 class AnnotationText(Element):
     point: Tuple[float, float]
     text_angle: float

@@ -16,6 +16,7 @@ says; the floor drops the lone circles and bare rectangles the source is mostly 
 """
 
 import argparse
+import hashlib
 import json
 import urllib.request
 from collections import defaultdict
@@ -192,8 +193,17 @@ def ensure_output_dir(output_dir: Path, overwrite: bool) -> None:
         )
 
 
-def write_split(split_name: str, config: DatasetConfig, output_dir: Path, renderer: StaticRenderer) -> int:
-    """Writes a split and returns how many sketches it holds.
+def write_split(split_name: str, config: DatasetConfig, output_dir: Path, renderer: StaticRenderer,
+                place=placed_actions, seen: Optional[set] = None, shuffle_seed: Optional[int] = None) -> int:
+    """Writes a split and returns how many sketches it holds. `place` turns a sketch into the
+    actions drawn for it, or ``None`` where the sketch is not kept.
+
+    Where `seen` is given, a sketch whose drawing is pixel for pixel one already in it is dropped,
+    and the drawings kept are added to it; sharing one set across the splits keeps a drawing out
+    of every split but the first to hold it.
+
+    Where `shuffle_seed` is given, the kept sketches are written in an order drawn from it rather
+    than the source's, which holds a document's sketches, and their copies, next to each other.
 
     Two passes over the sequences: the first finds which are kept, so that the image file can be
     made the right size, and the second draws them. The second reads only the kept ones, so it is
@@ -208,13 +218,22 @@ def write_split(split_name: str, config: DatasetConfig, output_dir: Path, render
 
     kept = []
     for at in range(len(sequences)):
-        if placed_actions(sketch_from_sequence(sequences[at]), config) is not None:
+        actions = place(sketch_from_sequence(sequences[at]), config)
+        if actions is not None and seen is not None:
+            drawn = hashlib.blake2b(render(actions, renderer).tobytes(), digest_size=16).digest()
+            if drawn in seen:
+                actions = None
+            else:
+                seen.add(drawn)
+        if actions is not None:
             kept.append(at)
             if config.limit is not None and len(kept) == config.limit:
                 break
         if (at + 1) % 100_000 == 0:
             print(f"[{split_name}] {at + 1}/{len(sequences)} read, {len(kept)} kept")
     print(f"[{split_name}] keeping {len(kept)} of {len(sequences)} sketches")
+    if shuffle_seed is not None:
+        kept = [kept[i] for i in np.random.default_rng(shuffle_seed).permutation(len(kept))]
 
     images = np.lib.format.open_memmap(
         output_dir / f"{split_name}_images.npy",
@@ -224,7 +243,7 @@ def write_split(split_name: str, config: DatasetConfig, output_dir: Path, render
     )
     with open(output_dir / f"{split_name}_labels.jsonl", "w", encoding="utf-8") as labels:
         for index, at in enumerate(kept):
-            actions = placed_actions(sketch_from_sequence(sequences[at]), config)
+            actions = place(sketch_from_sequence(sequences[at]), config)
             images[index] = render(actions, renderer)
             source = sketch_ids[at]
             labels.write(json.dumps({

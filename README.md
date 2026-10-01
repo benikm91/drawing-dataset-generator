@@ -66,6 +66,19 @@ uv run create_sketch_dataset.py --output-dir ./dataset_sketches_small --limit 13
 The sequences (6.2 GB for train) download into `--sequences-dir` once. Kept in full, train is
 about 1.15M drawings and 75 GB of images; `--limit 131072` is the size of the l-shape corpus.
 
+## CAD sketches with arcs
+
+The same sketches, widened to every primitive the published sequences draw: lines, circles and
+arcs. An arc is recorded as three points on it — start, halfway, end — read clockwise on the
+drawing, since its two ends alone leave open which circle it lies on. Sketch points are skipped
+rather than refused, as they draw nothing; ellipses and splines never appear, because SketchGraphs
+drops every sketch holding one when it builds the sequences.
+
+```
+uv run create_sketch_full_primitives_dataset.py --output-dir ./dataset_sketches_full --canvas-size 256
+uv run create_sketch_full_primitives_dataset.py --output-dir ./dataset_sketches_full_small --limit 131072
+```
+
 View generated dataset in a Web-App with:
 ```
 uv run view_dataset.py --dataset-dir ./dataset_rect
