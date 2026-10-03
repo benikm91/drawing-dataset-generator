@@ -17,4 +17,6 @@ dependencies = [
     # so it is taken from its repository; lz4 is what importing it needs and it does not declare.
     "sketchgraphs @ git+https://github.com/PrincetonLIPS/SketchGraphs",
     "lz4>=4.3",
+    "zstandard>=0.25.0",
+    "tqdm>=4.70.1",
 ]

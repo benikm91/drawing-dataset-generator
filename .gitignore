@@ -267,3 +267,5 @@ $RECYCLE.BIN/
 *.json
 *.jsonl
 *.png
+
+dataset_sketches_vitruvion/

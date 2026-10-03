@@ -79,6 +79,45 @@ uv run create_sketch_full_primitives_dataset.py --output-dir ./dataset_sketches_
 uv run create_sketch_full_primitives_dataset.py --output-dir ./dataset_sketches_full_small --limit 131072
 ```
 
+## Vitruvion's selection of SketchGraphs
+
+The data PICASSO, DAVINCI, PpaCAD and CadVLM train and test on is Vitruvion's preprocessed
+SketchGraphs file, which can no longer be downloaded. `create_vitruvion_dataset.py` rebuilds it
+from the raw SketchGraphs JSON shards with Vitruvion's rules, read from their code. It writes the
+primitives with continuous and quantised parameters, the categorical constraints, and a split of
+its own. What the labels mean is in [dataset_cards/vitruvion.md](dataset_cards/vitruvion.md), which
+each build copies into its folder as `README.md`, with its counts.
+
+`vitruvion_reference/` runs Vitruvion's own pipeline unchanged in Docker on the same shards, and
+compares the two sketch by sketch: same sketches, same order, identical primitive and constraint
+tokens.
+
+```
+vitruvion_reference/run_vitruvion.sh all                          # download, build both, compare
+SHARDS="1 2" SUFFIX=rehearsal vitruvion_reference/run_vitruvion.sh all   # the same on two shards
+```
+
+The full run needs Docker Desktop running and about 55 GB: 43 GB of shards, kept in
+`~/.detr-cache/input/sketchgraphs/shards`, and the two outputs.
+
+`dataset_sketches_vitruvion/` holds what Vitruvion's own code produced on all 128 shards: the
+rebuilt `sg_filtered_unique.npy` (1,643,604 sketches), the split Vitruvion's `split_dataset` draws
+from it (`vitruvion_reference/ref_split.py`), the order the shards were read in, and its card,
+[dataset_cards/sketches_vitruvion.md](dataset_cards/sketches_vitruvion.md).
+
+Its renders come from Vitruvion's own renderer, one clean and five hand-drawn per sketch, into
+`renders/`. The step can be stopped and restarted; about 21 hours on 4 CPUs, less with more CPUs
+given to Docker:
+```
+vitruvion_reference/run_vitruvion.sh render
+```
+
+Browse it, with the renders, primitives and constraints, and hover any of them to light it up on
+the drawing:
+```
+uv run view_vitruvion.py --dataset-dir ./dataset_sketches_vitruvion
+```
+
 View generated dataset in a Web-App with:
 ```
 uv run view_dataset.py --dataset-dir ./dataset_rect
