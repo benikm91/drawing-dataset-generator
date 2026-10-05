@@ -27,6 +27,17 @@ unchanged**, on the raw SketchGraphs JSON shards. It has the same format and the
 written for the original file, including Vitruvion's own (`sequence_path=…/sg_filtered_unique.npy`),
 reads it as is.
 
+![The clean renders of the first 256 training sketches](https://huggingface.co/datasets/benikm91/sketch-graph-vitruvion/resolve/main/train_first_256.png)
+
+*The clean renders of the first 256 training sketches.*
+
+![Sixteen training sketches with their constraints marked](https://huggingface.co/datasets/benikm91/sketch-graph-vitruvion/resolve/main/train_constraints_4x4.png)
+
+*Sixteen training sketches drawn from their labels, with the categorical constraints marked as a
+CAD program marks them: a dot where points coincide, and a letter on the primitive or on dotted
+connectors between the points it ties together. They are the first training sketches with 6 to 10
+primitives, an arc or a circle, and 6 to 14 constraints of at least 3 types.*
+
 ## How it was built
 
 - **Code:** Vitruvion at commit `1b91fff`, running `img2cad.pipeline.filter_sequences_from_source`
@@ -101,6 +112,7 @@ was kept, from reading the shards in a different order.
 | `splits.json` | `train`, `val` and `test`: sorted indices into the file, as drawn by Vitruvion's `split_dataset`. 1,520,334 / 41,089 / 82,181. |
 | `steps.json` | The counts in the table above. |
 | `shard_order.txt` | The order the 128 shards were read in. |
+| `train_first_256.png`, `train_constraints_4x4.png` | The two preview images above (`preview_vitruvion.py`). |
 | `renders/render_p128_XX_of_16.npy` | Vitruvion's renders of every sketch, in 16 chunks: one clean and five hand-drawn, 128 × 128 px (below). |
 
 ## Reading it

@@ -118,6 +118,12 @@ the drawing:
 uv run view_vitruvion.py --dataset-dir ./dataset_sketches_vitruvion
 ```
 
+The card's two preview images, the first 256 training renders and sixteen sketches with their
+constraints marked, are written into the folder by:
+```
+uv run preview_vitruvion.py --dataset-dir ./dataset_sketches_vitruvion
+```
+
 View generated dataset in a Web-App with:
 ```
 uv run view_dataset.py --dataset-dir ./dataset_rect
